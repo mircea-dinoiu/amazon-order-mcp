@@ -3,6 +3,7 @@
 
 import os
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Any
@@ -16,6 +17,21 @@ from dotenv import load_dotenv
 
 from amazonorders.session import AmazonSession, IODefault
 from amazonorders.orders import AmazonOrders
+from amazonorders.conf import AmazonOrdersConfig
+
+
+def _build_config() -> AmazonOrdersConfig:
+    """Enable Playwright-based solvers for Amazon's JavaScript sign-in challenges if installed."""
+    try:
+        import playwright  # noqa: F401
+    except ImportError:
+        return AmazonOrdersConfig()
+    return AmazonOrdersConfig(data={
+        "auth_forms_classes": [
+            "amazonorders.contrib.browser.playwright.PlaywrightAcicForm",
+            "amazonorders.contrib.browser.playwright.PlaywrightJSAuthForm",
+        ]
+    })
 
 # Load .env from current directory if it exists
 load_dotenv()
@@ -80,10 +96,14 @@ def get_orders_client(otp_code: Optional[str] = None, debug: bool = False) -> Am
         otp_secret_key=otp_secret,
         io=io_handler,
         debug=debug,
+        config=_build_config(),
     )
 
     try:
-        _session.login()
+        # Run login in a worker thread: Playwright's sync API (used to solve Amazon's
+        # JavaScript sign-in challenges) refuses to run on a thread with an asyncio loop.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(_session.login).result()
         _pending_otp_request = False
     except OTPRequiredError:
         _pending_otp_request = True
@@ -242,7 +262,7 @@ def amazon_get_order_history(
     else:
         kwargs["year"] = datetime.now().year
 
-    orders = client.get_order_history(**kwargs)
+    orders = client.get_orders(**kwargs)
 
     result = [order_to_dict(order) for order in orders]
 
@@ -301,7 +321,7 @@ def amazon_search_orders(
     else:
         kwargs["year"] = datetime.now().year
 
-    orders = client.get_order_history(**kwargs)
+    orders = client.get_orders(**kwargs)
 
     search_lower = search_term.lower()
     matching_orders = []
